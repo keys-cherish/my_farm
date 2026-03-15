@@ -3,8 +3,14 @@ import math
 import random
 from datetime import datetime, timezone
 
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
+
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import db
@@ -423,7 +429,25 @@ async def cmd_steal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── app lifecycle ────────────────────────────────────────
 async def post_init(app: Application):
     await db.init()
-    print("Database initialized.")
+    await app.bot.set_my_commands([
+        BotCommand("start", "开始游戏"),
+        BotCommand("farm", "查看农场"),
+        BotCommand("crops", "作物列表"),
+        BotCommand("plant", "种植作物"),
+        BotCommand("plantall", "批量种植"),
+        BotCommand("harvest", "收获作物"),
+        BotCommand("water", "浇水加速"),
+        BotCommand("clean", "清理害虫"),
+        BotCommand("cleardead", "清除枯死"),
+        BotCommand("balance", "查看余额"),
+        BotCommand("shop", "商店"),
+        BotCommand("upgrade", "升级农场"),
+        BotCommand("rank", "排行榜"),
+        BotCommand("steal", "偷菜"),
+        BotCommand("refresh", "刷新农场"),
+        BotCommand("help", "玩法说明"),
+    ])
+    print("Database initialized. Commands registered.")
 
 
 async def post_shutdown(app: Application):

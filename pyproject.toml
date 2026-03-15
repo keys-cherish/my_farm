@@ -7,4 +7,5 @@ dependencies = [
     "asyncpg>=0.31.0",
     "python-dotenv>=1.2.2",
     "python-telegram-bot[ext]>=22.6",
+    "uvloop>=0.21.0; sys_platform != 'win32'",
 ]
