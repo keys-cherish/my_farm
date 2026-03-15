@@ -39,8 +39,15 @@ ALLOWED_TOPIC_THREAD_IDS = [int(x) for x in os.getenv("ALLOWED_TOPIC_THREAD_IDS"
 def is_allowed(update: Update) -> bool:
     """检查消息是否来自允许的群组/话题"""
     chat = update.effective_chat
+    msg = update.message
     if not chat:
         return False
+    # 调试日志
+    thread_id = msg.message_thread_id if msg else None
+    logger.info(
+        f"[is_allowed] chat.id={chat.id} chat.type={chat.type} "
+        f"chat.username={chat.username} thread_id={thread_id}"
+    )
     # 私聊始终允许
     if chat.type == "private":
         return True
@@ -54,11 +61,12 @@ def is_allowed(update: Update) -> bool:
     if ALLOWED_CHAT_USERNAMES and chat.username and chat.username.lower() in ALLOWED_CHAT_USERNAMES:
         chat_ok = True
     if not chat_ok:
+        logger.info(f"[is_allowed] REJECTED: chat not in allowed list")
         return False
     # 如果配置了话题限制, 检查话题
     if ALLOWED_TOPIC_THREAD_IDS:
-        thread_id = update.message.message_thread_id if update.message else None
         if thread_id not in ALLOWED_TOPIC_THREAD_IDS:
+            logger.info(f"[is_allowed] REJECTED: thread_id {thread_id} not in {ALLOWED_TOPIC_THREAD_IDS}")
             return False
     return True
 
@@ -116,7 +124,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🌾 欢迎来到农场！\n\n"
         f"你获得了 {user['balance']} MB 启动资金和 {user['plots']} 块地。\n"
-        f"输入 /help 查看玩法说明。"
+        f"输入 /fm_help 查看玩法说明。"
     )
 
 
@@ -126,18 +134,18 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🌾 农场玩法说明\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🌱 /plant 作物名 — 种植作物\n"
-        "🌾 /farm — 查看农场状态\n"
-        "🥬 /crops — 查看作物列表\n"
-        "📦 /harvest — 收获成熟作物\n"
-        "💧 /water — 给作物浇水(加速10%)\n"
-        "🧹 /clean — 清理害虫/杂草\n"
-        "☠️ /cleardead — 清除枯死作物\n"
-        "🏪 /shop — 商店\n"
-        "⬆️ /upgrade — 升级农场\n"
-        "💰 /balance — 查看余额\n"
-        "🏆 /rank — 排行榜\n"
-        "🔄 /refresh — 刷新农场状态\n\n"
+        "🌱 /fm_plant 作物名 — 种植作物\n"
+        "🌾 /fm_farm — 查看农场状态\n"
+        "🥬 /fm_crops — 查看作物列表\n"
+        "📦 /fm_harvest — 收获成熟作物\n"
+        "💧 /fm_water — 给作物浇水(加速10%)\n"
+        "🧹 /fm_clean — 清理害虫/杂草\n"
+        "☠️ /fm_cleardead — 清除枯死作物\n"
+        "🏪 /fm_shop — 商店\n"
+        "⬆️ /fm_upgrade — 升级农场\n"
+        "💰 /fm_balance — 查看余额\n"
+        "🏆 /fm_rank — 排行榜\n"
+        "🔄 /fm_refresh — 刷新农场状态\n\n"
         "💡 种植作物需要花费种子费用(MB)\n"
         "💡 作物成熟后及时收获，超过24小时会枯死\n"
         "💡 浇水可以加速10%生长\n"
@@ -149,7 +157,7 @@ async def cmd_crops(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
     await ensure_user(update)
-    text = "🌱 请选择要种植的作物\n\n用法: /plant 作物名\n\n"
+    text = "🌱 请选择要种植的作物\n\n用法: /fm_plant 作物名\n\n"
     for name, c in game.CROPS.items():
         t = f"{c['minutes'] / 60}小时" if c["minutes"] >= 60 else f"{c['minutes']}分钟"
         text += f"{c['emoji']} {name} — 种子 {c['seed']} MB | 收获 {c['reward']} MB | {t}\n"
@@ -232,7 +240,7 @@ async def cmd_plant(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     crop_name = " ".join(ctx.args) if ctx.args else ""
 
     if not crop_name:
-        text = "🌱 请选择要种植的作物\n\n用法: /plant 作物名\n\n"
+        text = "🌱 请选择要种植的作物\n\n用法: /fm_plant 作物名\n\n"
         for name, c in game.CROPS.items():
             t = f"{c['minutes'] / 60}小时" if c["minutes"] >= 60 else f"{c['minutes']}分钟"
             text += f"{c['emoji']} {name} — 种子 {c['seed']} MB | 收获 {c['reward']} MB | {t}\n"
@@ -240,7 +248,7 @@ async def cmd_plant(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     crop = game.get_crop(crop_name)
     if not crop:
-        return await update.message.reply_text(f"❌ 未知作物: {crop_name}\n输入 /crops 查看可种植的作物")
+        return await update.message.reply_text(f"❌ 未知作物: {crop_name}\n输入 /fm_crops 查看可种植的作物")
 
     plots = await db.get_plots(user["user_id"])
     empty_plot = next((p for p in plots if not p["crop"]), None)
@@ -270,7 +278,7 @@ async def cmd_plantall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = await ensure_user(update)
     crop_name = " ".join(ctx.args) if ctx.args else ""
     if not crop_name:
-        return await update.message.reply_text("用法: /plantall 作物名 — 在所有空地种植")
+        return await update.message.reply_text("用法: /fm_plantall 作物名 — 在所有空地种植")
 
     crop = game.get_crop(crop_name)
     if not crop:
@@ -327,7 +335,7 @@ async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not harvested:
         hint = ""
         if any(p["crop"] and p["has_pest"] for p in plots):
-            hint = "\n💡 有些作物有害虫，先 /clean 清理"
+            hint = "\n💡 有些作物有害虫，先 /fm_clean 清理"
         return await update.message.reply_text(f"📦 没有可收获的作物~{hint}")
 
     await db.update_balance(uid, total_reward)
@@ -440,9 +448,9 @@ async def cmd_shop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏪 农场商店\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "💧 /water — 浇水(免费, 30分钟冷却)\n"
-        "🧹 /clean — 清理害虫(免费)\n"
-        "⬆️ /upgrade — 升级农场\n\n"
+        "💧 /fm_water — 浇水(免费, 30分钟冷却)\n"
+        "🧹 /fm_clean — 清理害虫(免费)\n"
+        "⬆️ /fm_upgrade — 升级农场\n\n"
         "💡 通过种植收获作物获得经验来升级\n"
         "💡 升级后自动获得更多农田"
     )
@@ -510,22 +518,22 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     await db.init()
     await app.bot.set_my_commands([
-        BotCommand("start", "开始游戏"),
-        BotCommand("farm", "查看农场"),
-        BotCommand("crops", "作物列表"),
-        BotCommand("plant", "种植作物"),
-        BotCommand("plantall", "批量种植"),
-        BotCommand("harvest", "收获作物"),
-        BotCommand("water", "浇水加速"),
-        BotCommand("clean", "清理害虫"),
-        BotCommand("cleardead", "清除枯死"),
-        BotCommand("balance", "查看余额"),
-        BotCommand("shop", "商店"),
-        BotCommand("upgrade", "升级农场"),
-        BotCommand("rank", "排行榜"),
-        BotCommand("steal", "偷菜"),
-        BotCommand("refresh", "刷新农场"),
-        BotCommand("help", "玩法说明"),
+        BotCommand("fm_start", "开始游戏"),
+        BotCommand("fm_farm", "查看农场"),
+        BotCommand("fm_crops", "作物列表"),
+        BotCommand("fm_plant", "种植作物"),
+        BotCommand("fm_plantall", "批量种植"),
+        BotCommand("fm_harvest", "收获作物"),
+        BotCommand("fm_water", "浇水加速"),
+        BotCommand("fm_clean", "清理害虫"),
+        BotCommand("fm_cleardead", "清除枯死"),
+        BotCommand("fm_balance", "查看余额"),
+        BotCommand("fm_shop", "商店"),
+        BotCommand("fm_upgrade", "升级农场"),
+        BotCommand("fm_rank", "排行榜"),
+        BotCommand("fm_steal", "偷菜"),
+        BotCommand("fm_refresh", "刷新农场"),
+        BotCommand("fm_help", "玩法说明"),
     ])
     logger.info("Database initialized. Commands registered.")
 
@@ -537,22 +545,22 @@ async def post_shutdown(app: Application):
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("crops", cmd_crops))
-    app.add_handler(CommandHandler("farm", cmd_farm))
-    app.add_handler(CommandHandler("refresh", cmd_farm))
-    app.add_handler(CommandHandler("plant", cmd_plant))
-    app.add_handler(CommandHandler("plantall", cmd_plantall))
-    app.add_handler(CommandHandler("harvest", cmd_harvest))
-    app.add_handler(CommandHandler("water", cmd_water))
-    app.add_handler(CommandHandler("clean", cmd_clean))
-    app.add_handler(CommandHandler("cleardead", cmd_cleardead))
-    app.add_handler(CommandHandler("balance", cmd_balance))
-    app.add_handler(CommandHandler("shop", cmd_shop))
-    app.add_handler(CommandHandler("upgrade", cmd_upgrade))
-    app.add_handler(CommandHandler("rank", cmd_rank))
-    app.add_handler(CommandHandler("steal", cmd_steal))
+    app.add_handler(CommandHandler("fm_start", cmd_start))
+    app.add_handler(CommandHandler("fm_help", cmd_help))
+    app.add_handler(CommandHandler("fm_crops", cmd_crops))
+    app.add_handler(CommandHandler("fm_farm", cmd_farm))
+    app.add_handler(CommandHandler("fm_refresh", cmd_farm))
+    app.add_handler(CommandHandler("fm_plant", cmd_plant))
+    app.add_handler(CommandHandler("fm_plantall", cmd_plantall))
+    app.add_handler(CommandHandler("fm_harvest", cmd_harvest))
+    app.add_handler(CommandHandler("fm_water", cmd_water))
+    app.add_handler(CommandHandler("fm_clean", cmd_clean))
+    app.add_handler(CommandHandler("fm_cleardead", cmd_cleardead))
+    app.add_handler(CommandHandler("fm_balance", cmd_balance))
+    app.add_handler(CommandHandler("fm_shop", cmd_shop))
+    app.add_handler(CommandHandler("fm_upgrade", cmd_upgrade))
+    app.add_handler(CommandHandler("fm_rank", cmd_rank))
+    app.add_handler(CommandHandler("fm_steal", cmd_steal))
     app.add_error_handler(error_handler)
 
     logger.info("Farm bot starting...")
