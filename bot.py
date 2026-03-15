@@ -1,6 +1,8 @@
 import os
+import logging
 import math
 import random
+import traceback
 from datetime import datetime, timezone
 
 try:
@@ -11,16 +13,54 @@ except ImportError:
 
 from dotenv import load_dotenv
 from telegram import BotCommand, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
 import db
 import game
 
 load_dotenv()
 
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise SystemExit("Please set BOT_TOKEN in .env")
+
+# 允许的群组/话题配置 (逗号分隔, 为空则允许所有)
+ALLOWED_CHAT_IDS = [int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if x.strip()]
+ALLOWED_CHAT_USERNAMES = [x.strip().lower() for x in os.getenv("ALLOWED_CHAT_USERNAMES", "").split(",") if x.strip()]
+ALLOWED_TOPIC_THREAD_IDS = [int(x) for x in os.getenv("ALLOWED_TOPIC_THREAD_IDS", "").split(",") if x.strip()]
+
+
+def is_allowed(update: Update) -> bool:
+    """检查消息是否来自允许的群组/话题"""
+    chat = update.effective_chat
+    if not chat:
+        return False
+    # 私聊始终允许
+    if chat.type == "private":
+        return True
+    # 如果没有任何限制配置, 允许所有
+    if not ALLOWED_CHAT_IDS and not ALLOWED_CHAT_USERNAMES:
+        return True
+    # 检查群组
+    chat_ok = False
+    if ALLOWED_CHAT_IDS and chat.id in ALLOWED_CHAT_IDS:
+        chat_ok = True
+    if ALLOWED_CHAT_USERNAMES and chat.username and chat.username.lower() in ALLOWED_CHAT_USERNAMES:
+        chat_ok = True
+    if not chat_ok:
+        return False
+    # 如果配置了话题限制, 检查话题
+    if ALLOWED_TOPIC_THREAD_IDS:
+        thread_id = update.message.message_thread_id if update.message else None
+        if thread_id not in ALLOWED_TOPIC_THREAD_IDS:
+            return False
+    return True
 
 
 # ── helpers ──────────────────────────────────────────────
@@ -70,6 +110,8 @@ async def check_dead_plots(user_id: int):
 
 # ── commands ─────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     await update.message.reply_text(
         f"🌾 欢迎来到农场！\n\n"
@@ -79,6 +121,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     await update.message.reply_text(
         "🌾 农场玩法说明\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -102,6 +146,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_crops(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     await ensure_user(update)
     text = "🌱 请选择要种植的作物\n\n用法: /plant 作物名\n\n"
     for name, c in game.CROPS.items():
@@ -111,6 +157,8 @@ async def cmd_crops(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_farm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     uid = user["user_id"]
     await check_dead_plots(uid)
@@ -178,6 +226,8 @@ async def cmd_farm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_plant(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     crop_name = " ".join(ctx.args) if ctx.args else ""
 
@@ -215,6 +265,8 @@ async def cmd_plant(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_plantall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     crop_name = " ".join(ctx.args) if ctx.args else ""
     if not crop_name:
@@ -247,6 +299,8 @@ async def cmd_plantall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     uid = user["user_id"]
     await check_dead_plots(uid)
@@ -297,6 +351,8 @@ async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_water(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     now = datetime.now(timezone.utc)
     last = user["last_water"]
@@ -331,6 +387,8 @@ async def cmd_water(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_clean(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     plots = await db.get_plots(user["user_id"])
     cleaned = 0
@@ -345,6 +403,8 @@ async def cmd_clean(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_cleardead(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     plots = await db.get_plots(user["user_id"])
     cleared = 0
@@ -359,6 +419,8 @@ async def cmd_cleardead(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     info = game.get_level_info(user["level"])
     await update.message.reply_text(
@@ -372,6 +434,8 @@ async def cmd_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_shop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     await ensure_user(update)
     await update.message.reply_text(
         "🏪 农场商店\n"
@@ -385,6 +449,8 @@ async def cmd_shop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_upgrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     info = game.get_level_info(user["level"])
     if user["level"] >= 10:
@@ -405,6 +471,8 @@ async def cmd_upgrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     await ensure_user(update)
     top = await db.get_top_users(10)
     text = "🏆 农场排行榜\n━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -416,6 +484,8 @@ async def cmd_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_steal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
     user = await ensure_user(update)
     if random.random() > 0.3:
         fine = random.randint(5, 15)
@@ -424,6 +494,16 @@ async def cmd_steal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     stolen = random.randint(5, 25)
     await db.update_balance(user["user_id"], stolen)
     await update.message.reply_text(f"🥷 偷菜成功！获得 {stolen} MB")
+
+
+# ── error handler ────────────────────────────────────────
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error("Exception while handling update:", exc_info=ctx.error)
+    if isinstance(update, Update) and update.message:
+        try:
+            await update.message.reply_text("❌ 处理命令时出错，请稍后再试")
+        except Exception:
+            pass
 
 
 # ── app lifecycle ────────────────────────────────────────
@@ -447,7 +527,7 @@ async def post_init(app: Application):
         BotCommand("refresh", "刷新农场"),
         BotCommand("help", "玩法说明"),
     ])
-    print("Database initialized. Commands registered.")
+    logger.info("Database initialized. Commands registered.")
 
 
 async def post_shutdown(app: Application):
@@ -473,9 +553,10 @@ def main():
     app.add_handler(CommandHandler("upgrade", cmd_upgrade))
     app.add_handler(CommandHandler("rank", cmd_rank))
     app.add_handler(CommandHandler("steal", cmd_steal))
+    app.add_error_handler(error_handler)
 
-    print("Farm bot starting...")
-    app.run_polling()
+    logger.info("Farm bot starting...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
