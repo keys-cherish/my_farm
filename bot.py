@@ -426,6 +426,21 @@ async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text += f"  {h['emoji']} {h['name']} — +{h['reward']:.1f} MB\n"
     text += f"\n💰 共获得 {total_reward:.1f} MB 流量\n"
     text += f"💰 余额: {fresh['balance']:.1f} MB | 经验 +{total_exp}"
+
+    # 提示被害虫阻止的成熟作物
+    pest_blocked = []
+    fresh_plots = await db.get_plots(uid)
+    for p in fresh_plots:
+        if p["crop"] and not p["is_dead"] and p["has_pest"]:
+            crop = game.get_crop(p["crop"])
+            if crop:
+                remain = game.get_remaining_minutes(p["planted_at"], crop["minutes"])
+                remain *= 0.9 ** p["water_count"]
+                if remain <= 0:
+                    pest_blocked.append(f"{crop['emoji']}{p['crop']}")
+    if pest_blocked:
+        text += f"\n\n⚠️ 还有 {len(pest_blocked)} 个成熟作物被害虫阻止收获：{', '.join(pest_blocked)}\n用 /fm_clean 清理后再收获"
+
     if new_level:
         text += f"\n\n🎉 恭喜升级到 Lv.{new_level}！农场扩展到 {fresh['plots']} 块地！"
     await update.message.reply_text(text)
