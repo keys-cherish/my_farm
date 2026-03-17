@@ -154,11 +154,15 @@ async def clear_plot(user_id: int, slot: int):
         )
 
 
-async def water_plot(user_id: int, slot: int):
+async def water_plot(user_id: int, slot: int, minutes_saved: float):
+    """Advance planted_at backward by minutes_saved (effectively speeds up growth)."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE plots SET water_count = water_count + 1 WHERE user_id = $1 AND slot = $2",
-            user_id, slot,
+            "UPDATE plots SET "
+            "planted_at = planted_at - make_interval(secs => $1), "
+            "water_count = water_count + 1 "
+            "WHERE user_id = $2 AND slot = $3",
+            minutes_saved * 60, user_id, slot,
         )
 
 

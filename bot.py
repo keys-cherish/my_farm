@@ -172,8 +172,7 @@ async def job_check_mature(ctx: ContextTypes.DEFAULT_TYPE):
         crop = game.get_crop(p["crop"])
         if not crop:
             continue
-        remain = game.get_remaining_minutes(p["planted_at"], crop["minutes"])
-        remain *= 0.9 ** p["water_count"]
+        remain = game.get_remaining_minutes(p["planted_at"], p["effective_minutes"] or crop["minutes"])
         if remain <= 0:
             by_user.setdefault(p["user_id"], []).append(p)
 
@@ -264,8 +263,7 @@ async def cmd_farm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             crop = game.get_crop(p["crop"])
             if not crop:
                 continue
-            remain = game.get_remaining_minutes(p["planted_at"], crop["minutes"])
-            remain *= 0.9 ** p["water_count"]
+            remain = game.get_remaining_minutes(p["planted_at"], p["effective_minutes"] or crop["minutes"])
             if remain <= 0:
                 grid_lines.append((crop["emoji"], "✅"))
                 mature += 1
@@ -285,8 +283,7 @@ async def cmd_farm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         crop = game.get_crop(p["crop"])
         if not crop:
             continue
-        remain = game.get_remaining_minutes(p["planted_at"], crop["minutes"])
-        remain *= 0.9 ** p["water_count"]
+        remain = game.get_remaining_minutes(p["planted_at"], p["effective_minutes"] or crop["minutes"])
         if remain <= 0:
             detail_lines.append(f"  {crop['emoji']} {p['crop']} — ✅ 已成熟")
         else:
@@ -401,8 +398,7 @@ async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         crop = game.get_crop(p["crop"])
         if not crop:
             continue
-        remain = game.get_remaining_minutes(p["planted_at"], crop["minutes"])
-        remain *= 0.9 ** p["water_count"]
+        remain = game.get_remaining_minutes(p["planted_at"], p["effective_minutes"] or crop["minutes"])
         if remain <= 0 and not p["has_pest"]:
             reward = crop["reward"]
             total_reward += reward
@@ -434,8 +430,7 @@ async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if p["crop"] and not p["is_dead"] and p["has_pest"]:
             crop = game.get_crop(p["crop"])
             if crop:
-                remain = game.get_remaining_minutes(p["planted_at"], crop["minutes"])
-                remain *= 0.9 ** p["water_count"]
+                remain = game.get_remaining_minutes(p["planted_at"], p["effective_minutes"] or crop["minutes"])
                 if remain <= 0:
                     pest_blocked.append(f"{crop['emoji']}{p['crop']}")
     if pest_blocked:
@@ -469,10 +464,10 @@ async def cmd_water(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             crop = game.get_crop(p["crop"])
             if not crop:
                 continue
-            remain = game.get_remaining_minutes(p["planted_at"], crop["minutes"])
-            remain *= 0.9 ** p["water_count"]
+            eff = p["effective_minutes"] or crop["minutes"]
+            remain = game.get_remaining_minutes(p["planted_at"], eff)
             if remain > 0:
-                await db.water_plot(user["user_id"], p["slot"])
+                await db.water_plot(user["user_id"], p["slot"], eff * 0.1)
                 watered += 1
 
     if watered == 0:
@@ -533,8 +528,7 @@ async def cmd_steal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not crop:
         return await update.message.reply_text("❌ 没有可以偷的成熟作物")
 
-    remain = game.get_remaining_minutes(target_plot["planted_at"], crop["minutes"])
-    remain *= 0.9 ** target_plot["water_count"]
+    remain = game.get_remaining_minutes(target_plot["planted_at"], target_plot["effective_minutes"] or crop["minutes"])
     if remain > 0:
         return await update.message.reply_text("❌ 没有可以偷的成熟作物")
 
