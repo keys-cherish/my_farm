@@ -337,7 +337,7 @@ async def cmd_plant(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     await db.update_balance(user["user_id"], -crop["seed"])
-    await db.plant_crop(user["user_id"], empty_plot["slot"], crop_name)
+    await db.plant_crop(user["user_id"], empty_plot["slot"], crop_name, crop["minutes"])
 
     t = f"{crop['minutes'] / 60}小时" if crop["minutes"] >= 60 else f"{crop['minutes']}分钟"
     await update.message.reply_text(
@@ -370,7 +370,7 @@ async def cmd_plantall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if fresh["balance"] < crop["seed"]:
             break
         await db.update_balance(user["user_id"], -crop["seed"])
-        await db.plant_crop(user["user_id"], ep["slot"], crop_name)
+        await db.plant_crop(user["user_id"], ep["slot"], crop_name, crop["minutes"])
         planted += 1
 
     final = await db.get_user(user["user_id"])

@@ -31,6 +31,7 @@ async def init():
                 crop TEXT DEFAULT '',
                 planted_at TIMESTAMPTZ,
                 water_count INTEGER DEFAULT 0,
+                effective_minutes DOUBLE PRECISION DEFAULT 0,
                 has_pest BOOLEAN DEFAULT FALSE,
                 pest_type TEXT DEFAULT '',
                 pest_at TIMESTAMPTZ,
@@ -46,6 +47,7 @@ async def init():
             ("notified_mature", "BOOLEAN", "FALSE"),
             ("steal_count", "INTEGER", "0"),
             ("steal_date", "TEXT", "''"),
+            ("effective_minutes", "DOUBLE PRECISION", "0"),
         ]:
             try:
                 table = "plots" if col not in ("steal_count", "steal_date") else "users"
@@ -134,20 +136,21 @@ async def get_plots(user_id: int):
         return await conn.fetch("SELECT * FROM plots WHERE user_id = $1 ORDER BY slot ASC", user_id)
 
 
-async def plant_crop(user_id: int, slot: int, crop_name: str):
+async def plant_crop(user_id: int, slot: int, crop_name: str, growth_minutes: float):
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE plots SET crop = $1, planted_at = NOW(), water_count = 0, "
+            "effective_minutes = $4, "
             "has_pest = FALSE, pest_type = '', pest_at = NULL, is_dead = FALSE, notified_mature = FALSE "
             "WHERE user_id = $2 AND slot = $3",
-            crop_name, user_id, slot,
+            crop_name, user_id, slot, growth_minutes,
         )
 
 
 async def clear_plot(user_id: int, slot: int):
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE plots SET crop = '', planted_at = NULL, water_count = 0, "
+            "UPDATE plots SET crop = '', planted_at = NULL, water_count = 0, effective_minutes = 0, "
             "has_pest = FALSE, pest_type = '', pest_at = NULL, is_dead = FALSE, notified_mature = FALSE "
             "WHERE user_id = $1 AND slot = $2",
             user_id, slot,
