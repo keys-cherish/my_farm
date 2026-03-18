@@ -1,13 +1,21 @@
 import asyncpg
+import functools
+import inspect
+import logging
 import os
+import time
 
 
 pool: asyncpg.Pool | None = None
+logger = logging.getLogger("farm.db")
+DB_SLOW_MS = int(os.getenv("DB_SLOW_MS", "120"))
+DB_LOG_DEBUG = os.getenv("DB_LOG_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 async def init():
     global pool
     pool = await asyncpg.create_pool(dsn=os.getenv("DATABASE_URL"))
+    logger.info("db.pool.initialized", extra={"event": "db_pool_initialized"})
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -60,6 +68,7 @@ async def close():
     global pool
     if pool:
         await pool.close()
+        logger.info("db.pool.closed", extra={"event": "db_pool_closed"})
 
 
 # --- User ---
@@ -250,3 +259,49 @@ async def get_random_harvestable_plot(exclude_user_id: int):
 async def get_top_users(limit: int = 10):
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM users ORDER BY balance DESC LIMIT $1", limit)
+
+
+def _instrument_async(name: str, func):
+    if getattr(func, "__db_instrumented__", False):
+        return func
+
+    @functools.wraps(func)
+    async def wrapped(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            result = await func(*args, **kwargs)
+        except Exception:
+            duration_ms = (time.perf_counter() - started) * 1000
+            logger.exception(
+                "db.call.failed",
+                extra={"event": "db_call_failed", "db_op": name, "duration_ms": duration_ms},
+            )
+            raise
+        else:
+            duration_ms = (time.perf_counter() - started) * 1000
+            if duration_ms >= DB_SLOW_MS:
+                logger.warning(
+                    "db.call.slow",
+                    extra={"event": "db_call_slow", "db_op": name, "duration_ms": duration_ms},
+                )
+            elif DB_LOG_DEBUG and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "db.call.done",
+                    extra={"event": "db_call_done", "db_op": name, "duration_ms": duration_ms},
+                )
+            return result
+
+    wrapped.__db_instrumented__ = True
+    return wrapped
+
+
+def _enable_db_instrumentation() -> None:
+    ignore = {"_instrument_async", "_enable_db_instrumentation"}
+    for name, value in list(globals().items()):
+        if name in ignore or name.startswith("_"):
+            continue
+        if inspect.iscoroutinefunction(value):
+            globals()[name] = _instrument_async(name, value)
+
+
+_enable_db_instrumentation()

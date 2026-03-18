@@ -2,7 +2,10 @@ import os
 import logging
 import math
 import random
+import time
+import uuid
 from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
 
 try:
     import uvloop
@@ -13,17 +16,15 @@ except ImportError:
 from dotenv import load_dotenv
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
-import db
-import game
+from log_setup import bind_context, clear_context, configure_logging, shutdown_logging
 
 load_dotenv()
 
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+configure_logging()
+logger = logging.getLogger("farm.bot")
+
+import db
+import game
 
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
@@ -45,10 +46,90 @@ PEST_EVENT_TYPES = [
 PEST_DEATH_MINUTES = 120  # 2小时不清理就枯死
 
 
+SLOW_COMMAND_MS = int(os.getenv("LOG_SLOW_COMMAND_MS", "500"))
+SLOW_JOB_MS = int(os.getenv("LOG_SLOW_JOB_MS", "1000"))
+
+CommandHandlerFn = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Any]]
+JobHandlerFn = Callable[[ContextTypes.DEFAULT_TYPE], Awaitable[Any]]
+
+
+def _build_update_log_context(update: Update) -> dict[str, Any]:
+    message = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    return {
+        "user_id": user.id if user else "-",
+        "chat_id": chat.id if chat else "-",
+        "thread_id": getattr(message, "message_thread_id", None) if message else "-",
+    }
+
+
+async def _run_logged_command(
+    command_name: str,
+    callback: CommandHandlerFn,
+    update: Update,
+    ctx: ContextTypes.DEFAULT_TYPE,
+):
+    trace_id = uuid.uuid4().hex[:12]
+    token = bind_context(command=command_name, trace_id=trace_id, **_build_update_log_context(update))
+    started = time.perf_counter()
+    logger.info("command.start", extra={"event": "command_start"})
+    try:
+        result = await callback(update, ctx)
+    except Exception:
+        duration_ms = (time.perf_counter() - started) * 1000
+        logger.exception("command.failed", extra={"event": "command_failed", "duration_ms": duration_ms})
+        raise
+    else:
+        duration_ms = (time.perf_counter() - started) * 1000
+        if duration_ms >= SLOW_COMMAND_MS:
+            logger.warning("command.slow", extra={"event": "command_slow", "duration_ms": duration_ms})
+        else:
+            logger.info("command.done", extra={"event": "command_done", "duration_ms": duration_ms})
+        return result
+    finally:
+        clear_context(token)
+
+
+def _wrap_command(command_name: str, callback: CommandHandlerFn) -> CommandHandlerFn:
+    async def wrapped(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        return await _run_logged_command(command_name, callback, update, ctx)
+
+    wrapped.__name__ = f"wrapped_{callback.__name__}_{command_name}"
+    return wrapped
+
+
+def _wrap_job(job_name: str, callback: JobHandlerFn) -> JobHandlerFn:
+    async def wrapped(ctx: ContextTypes.DEFAULT_TYPE):
+        trace_id = uuid.uuid4().hex[:12]
+        token = bind_context(command=job_name, trace_id=trace_id)
+        started = time.perf_counter()
+        logger.info("job.start", extra={"event": "job_start"})
+        try:
+            result = await callback(ctx)
+        except Exception:
+            duration_ms = (time.perf_counter() - started) * 1000
+            logger.exception("job.failed", extra={"event": "job_failed", "duration_ms": duration_ms})
+            raise
+        else:
+            duration_ms = (time.perf_counter() - started) * 1000
+            if duration_ms >= SLOW_JOB_MS:
+                logger.warning("job.slow", extra={"event": "job_slow", "duration_ms": duration_ms})
+            else:
+                logger.info("job.done", extra={"event": "job_done", "duration_ms": duration_ms})
+            return result
+        finally:
+            clear_context(token)
+
+    wrapped.__name__ = f"wrapped_{callback.__name__}_{job_name}"
+    return wrapped
+
+
 def is_allowed(update: Update) -> bool:
     chat = update.effective_chat
     msg = update.message
     if not chat:
+        logger.warning("access.denied", extra={"event": "access_denied"})
         return False
     thread_id = msg.message_thread_id if msg else None
     if chat.type == "private":
@@ -61,9 +142,11 @@ def is_allowed(update: Update) -> bool:
     if ALLOWED_CHAT_USERNAMES and chat.username and chat.username.lower() in ALLOWED_CHAT_USERNAMES:
         chat_ok = True
     if not chat_ok:
+        logger.info("access.denied.chat", extra={"event": "access_denied"})
         return False
     if ALLOWED_TOPIC_THREAD_IDS:
         if thread_id not in ALLOWED_TOPIC_THREAD_IDS:
+            logger.info("access.denied.thread", extra={"event": "access_denied"})
             return False
     return True
 
@@ -77,8 +160,8 @@ async def notify(bot, text):
         if NOTIFY_THREAD_ID:
             kwargs["message_thread_id"] = NOTIFY_THREAD_ID
         await bot.send_message(**kwargs)
-    except Exception as e:
-        logger.error(f"Failed to send notification: {e}")
+    except Exception:
+        logger.exception("notify.failed", extra={"event": "notify_failed"})
 
 
 # ── helpers ──────────────────────────────────────────────
@@ -626,7 +709,10 @@ async def cmd_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── error handler ────────────────────────────────────────
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
-    logger.error("Exception while handling update:", exc_info=ctx.error)
+    extra = {"event": "update_error"}
+    if isinstance(update, Update):
+        extra.update(_build_update_log_context(update))
+    logger.error("update.error", exc_info=ctx.error, extra=extra)
     if isinstance(update, Update) and update.message:
         try:
             await update.message.reply_text("❌ 处理命令时出错，请稍后再试")
@@ -634,7 +720,6 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ── app lifecycle ────────────────────────────────────────
 async def post_init(app: Application):
     await db.init()
     await app.bot.set_my_commands([
@@ -656,41 +741,44 @@ async def post_init(app: Application):
         BotCommand("fm_help", "玩法说明"),
     ])
 
-    # 定时任务
     jq = app.job_queue
-    jq.run_repeating(job_random_pest, interval=600, first=60)       # 每10分钟检查随机事件
-    jq.run_repeating(job_check_pest_death, interval=300, first=120) # 每5分钟检查害虫超时
-    jq.run_repeating(job_check_mature, interval=120, first=30)      # 每2分钟检查成熟通知
-
-    logger.info("Database initialized. Commands & jobs registered.")
+    jq.run_repeating(_wrap_job("job_random_pest", job_random_pest), interval=600, first=60)
+    jq.run_repeating(_wrap_job("job_check_pest_death", job_check_pest_death), interval=300, first=120)
+    jq.run_repeating(_wrap_job("job_check_mature", job_check_mature), interval=120, first=30)
+    logger.info("app.ready", extra={"event": "app_ready"})
 
 
 async def post_shutdown(app: Application):
     await db.close()
+    shutdown_logging()
 
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    app.add_handler(CommandHandler("fm_start", cmd_start))
-    app.add_handler(CommandHandler("fm_help", cmd_help))
-    app.add_handler(CommandHandler("fm_crops", cmd_crops))
-    app.add_handler(CommandHandler("fm_farm", cmd_farm))
-    app.add_handler(CommandHandler("fm_refresh", cmd_farm))
-    app.add_handler(CommandHandler("fm_plant", cmd_plant))
-    app.add_handler(CommandHandler("fm_plantall", cmd_plantall))
-    app.add_handler(CommandHandler("fm_harvest", cmd_harvest))
-    app.add_handler(CommandHandler("fm_water", cmd_water))
-    app.add_handler(CommandHandler("fm_clean", cmd_clean))
-    app.add_handler(CommandHandler("fm_cleardead", cmd_cleardead))
-    app.add_handler(CommandHandler("fm_steal", cmd_steal))
-    app.add_handler(CommandHandler("fm_balance", cmd_balance))
-    app.add_handler(CommandHandler("fm_shop", cmd_shop))
-    app.add_handler(CommandHandler("fm_upgrade", cmd_upgrade))
-    app.add_handler(CommandHandler("fm_rank", cmd_rank))
+    command_map: list[tuple[str, CommandHandlerFn]] = [
+        ("fm_start", cmd_start),
+        ("fm_help", cmd_help),
+        ("fm_crops", cmd_crops),
+        ("fm_farm", cmd_farm),
+        ("fm_refresh", cmd_farm),
+        ("fm_plant", cmd_plant),
+        ("fm_plantall", cmd_plantall),
+        ("fm_harvest", cmd_harvest),
+        ("fm_water", cmd_water),
+        ("fm_clean", cmd_clean),
+        ("fm_cleardead", cmd_cleardead),
+        ("fm_steal", cmd_steal),
+        ("fm_balance", cmd_balance),
+        ("fm_shop", cmd_shop),
+        ("fm_upgrade", cmd_upgrade),
+        ("fm_rank", cmd_rank),
+    ]
+    for command_name, callback in command_map:
+        app.add_handler(CommandHandler(command_name, _wrap_command(command_name, callback)))
     app.add_error_handler(error_handler)
 
-    logger.info("Farm bot starting...")
+    logger.info("app.starting", extra={"event": "app_starting"})
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
