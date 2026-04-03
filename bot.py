@@ -4,6 +4,7 @@ import math
 import random
 import time
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -34,7 +35,6 @@ ALLOWED_CHAT_IDS = [int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",")
 ALLOWED_CHAT_USERNAMES = [x.strip().lower() for x in os.getenv("ALLOWED_CHAT_USERNAMES", "").split(",") if x.strip()]
 ALLOWED_TOPIC_THREAD_IDS = [int(x) for x in os.getenv("ALLOWED_TOPIC_THREAD_IDS", "").split(",") if x.strip()]
 
-# 事件通知发送到的 chat_id 和 thread_id
 NOTIFY_CHAT_ID = ALLOWED_CHAT_IDS[0] if ALLOWED_CHAT_IDS else None
 NOTIFY_THREAD_ID = ALLOWED_TOPIC_THREAD_IDS[0] if ALLOWED_TOPIC_THREAD_IDS else None
 
@@ -43,11 +43,36 @@ PEST_EVENT_TYPES = [
     ("🐛", "蛀虫"),
     ("💩", "粪便"),
 ]
-PEST_DEATH_MINUTES = 120  # 2小时不清理就枯死
-
+PEST_DEATH_MINUTES = 120
 
 SLOW_COMMAND_MS = int(os.getenv("LOG_SLOW_COMMAND_MS", "500"))
 SLOW_JOB_MS = int(os.getenv("LOG_SLOW_JOB_MS", "1000"))
+
+# ── 全局限速器 ────────────────────────────────────────────
+# Telegram limits: ~20 msgs/min to same group, ~30 msgs/sec overall
+_last_notify_time: float = 0.0
+_NOTIFY_MIN_INTERVAL = 3.0  # 每条通知至少间隔3秒
+
+
+async def notify(bot, text: str):
+    """发送事件通知到群组, 带全局限速"""
+    global _last_notify_time
+    if not NOTIFY_CHAT_ID:
+        return
+    try:
+        # 限速: 距离上次发送至少3秒
+        now = time.monotonic()
+        wait = _NOTIFY_MIN_INTERVAL - (now - _last_notify_time)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        kwargs = {"chat_id": NOTIFY_CHAT_ID, "text": text}
+        if NOTIFY_THREAD_ID:
+            kwargs["message_thread_id"] = NOTIFY_THREAD_ID
+        await bot.send_message(**kwargs)
+        _last_notify_time = time.monotonic()
+    except Exception:
+        logger.exception("notify.failed", extra={"event": "notify_failed"})
+
 
 CommandHandlerFn = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Any]]
 JobHandlerFn = Callable[[ContextTypes.DEFAULT_TYPE], Awaitable[Any]]
@@ -129,7 +154,6 @@ def is_allowed(update: Update) -> bool:
     chat = update.effective_chat
     msg = update.message
     if not chat:
-        logger.warning("access.denied", extra={"event": "access_denied"})
         return False
     thread_id = msg.message_thread_id if msg else None
     if chat.type == "private":
@@ -142,26 +166,11 @@ def is_allowed(update: Update) -> bool:
     if ALLOWED_CHAT_USERNAMES and chat.username and chat.username.lower() in ALLOWED_CHAT_USERNAMES:
         chat_ok = True
     if not chat_ok:
-        logger.info("access.denied.chat", extra={"event": "access_denied"})
         return False
     if ALLOWED_TOPIC_THREAD_IDS:
         if thread_id not in ALLOWED_TOPIC_THREAD_IDS:
-            logger.info("access.denied.thread", extra={"event": "access_denied"})
             return False
     return True
-
-
-async def notify(bot, text):
-    """发送事件通知到群组"""
-    if not NOTIFY_CHAT_ID:
-        return
-    try:
-        kwargs = {"chat_id": NOTIFY_CHAT_ID, "text": text}
-        if NOTIFY_THREAD_ID:
-            kwargs["message_thread_id"] = NOTIFY_THREAD_ID
-        await bot.send_message(**kwargs)
-    except Exception:
-        logger.exception("notify.failed", extra={"event": "notify_failed"})
 
 
 # ── helpers ──────────────────────────────────────────────
@@ -172,7 +181,9 @@ async def ensure_user(update: Update):
     if not user:
         user = await db.create_user(uid, uname)
     else:
-        await db.update_username(uid, uname)
+        # 只在 username 变化时才写 DB
+        if (user["username"] or "") != uname:
+            await db.update_username(uid, uname)
     return user
 
 
@@ -189,36 +200,37 @@ async def check_level_up(user_id: int):
     return None
 
 
-# ── scheduled jobs ───────────────────────────────────────
+# ── scheduled jobs (合并通知, 减少API调用) ─────────────────
 async def job_random_pest(ctx: ContextTypes.DEFAULT_TYPE):
-    """定期随机给玩家农场生成害虫/粪便"""
+    """定期随机给玩家农场生成害虫/粪便 — 合并为单条通知"""
     growing = await db.get_all_growing_plots()
     if not growing:
         return
 
-    # 按用户分组
     by_user = {}
     for p in growing:
         by_user.setdefault(p["user_id"], []).append(p)
 
+    events = []  # 收集所有事件
     for user_id, plots in by_user.items():
-        # 每个用户 15% 概率触发一次事件
         if random.random() > 0.15:
             continue
         target = random.choice(plots)
         pest_emoji, pest_name = random.choice(PEST_EVENT_TYPES)
         await db.set_pest(user_id, target["slot"], True, f"{pest_emoji}{pest_name}")
         username = target["username"] or "Anonymous"
-        await notify(
-            ctx.bot,
-            f"⚠️ {username} 的农场出现了 {pest_emoji}{pest_name}×1！\n"
-            f"2小时内不清理作物会枯死！ /fm_clean"
-        )
-        logger.info(f"Pest event: {username} got {pest_name}")
+        events.append(f"⚠️ {username} — {pest_emoji}{pest_name}×1")
+
+    if events:
+        # 合并为1条消息
+        text = "🐛 农场害虫播报\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        text += "\n".join(events)
+        text += "\n\n2小时内不清理作物会枯死！ /fm_clean"
+        await notify(ctx.bot, text)
 
 
 async def job_check_pest_death(ctx: ContextTypes.DEFAULT_TYPE):
-    """检查害虫超时，杀死作物"""
+    """检查害虫超时, 杀死作物 — 合并为单条通知"""
     expired = await db.get_pest_expired_plots(PEST_DEATH_MINUTES)
     if not expired:
         return
@@ -227,25 +239,28 @@ async def job_check_pest_death(ctx: ContextTypes.DEFAULT_TYPE):
     for p in expired:
         by_user.setdefault(p["user_id"], []).append(p)
 
+    lines = []
     for user_id, plots in by_user.items():
-        dead_crops = []
+        dead_names = []
         for p in plots:
             crop = game.get_crop(p["crop"])
             if not crop:
                 continue
             await db.set_dead(user_id, p["slot"])
-            pest_info = p["pest_type"] or "害虫"
-            dead_crops.append(f"  💀 {crop['emoji']}{p['crop']}（{pest_info}）")
-
-        if dead_crops:
+            dead_names.append(f"{crop['emoji']}{p['crop']}")
+        if dead_names:
             username = plots[0]["username"] or "Anonymous"
-            text = f"☠️ {username} 的作物枯死了...\n" + "\n".join(dead_crops) + "\n用 /fm_farm 查看农场"
-            await notify(ctx.bot, text)
-            logger.info(f"Pest death: {username}, {len(dead_crops)} crops died")
+            lines.append(f"☠️ {username} — {', '.join(dead_names)}")
+
+    if lines:
+        text = "💀 作物枯死播报\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        text += "\n".join(lines)
+        text += "\n\n用 /fm_cleardead 清除枯死作物"
+        await notify(ctx.bot, text)
 
 
 async def job_check_mature(ctx: ContextTypes.DEFAULT_TYPE):
-    """检查作物成熟，发送通知"""
+    """检查作物成熟 — 合并为单条通知"""
     plots = await db.get_mature_unnotified()
     if not plots:
         return
@@ -259,6 +274,10 @@ async def job_check_mature(ctx: ContextTypes.DEFAULT_TYPE):
         if remain <= 0:
             by_user.setdefault(p["user_id"], []).append(p)
 
+    if not by_user:
+        return
+
+    lines = []
     for user_id, mature_plots in by_user.items():
         crop_names = []
         for p in mature_plots:
@@ -266,12 +285,15 @@ async def job_check_mature(ctx: ContextTypes.DEFAULT_TYPE):
             if crop:
                 crop_names.append(f"{crop['emoji']}{p['crop']}")
             await db.set_notified_mature(user_id, p["slot"])
-
         if crop_names:
             username = mature_plots[0]["username"] or "Anonymous"
-            text = f"🌾 {username} 的作物成熟啦！\n{', '.join(crop_names)}\n快去 /fm_harvest 收获吧~"
-            await notify(ctx.bot, text)
-            logger.info(f"Mature notify: {username}, {len(crop_names)} crops")
+            lines.append(f"🌾 {username} — {', '.join(crop_names)}")
+
+    if lines:
+        text = "📦 作物成熟播报\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        text += "\n".join(lines)
+        text += "\n\n快去 /fm_harvest 收获吧~"
+        await notify(ctx.bot, text)
 
 
 # ── commands ─────────────────────────────────────────────
@@ -447,19 +469,24 @@ async def cmd_plantall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not empty_plots:
         return await update.message.reply_text("❌ 没有空地了！")
 
-    planted = 0
-    for ep in empty_plots:
-        fresh = await db.get_user(user["user_id"])
-        if fresh["balance"] < crop["seed"]:
-            break
-        await db.update_balance(user["user_id"], -crop["seed"])
+    # 预先计算能种多少
+    fresh = await db.get_user(user["user_id"])
+    can_afford = min(len(empty_plots), int(fresh["balance"] // crop["seed"]))
+    if can_afford <= 0:
+        return await update.message.reply_text(
+            f"❌ 余额不足！种植{crop_name}需要 {crop['seed']} MB，你只有 {fresh['balance']:.1f} MB"
+        )
+
+    # 批量扣费 + 种植
+    total_cost = crop["seed"] * can_afford
+    await db.update_balance(user["user_id"], -total_cost)
+    for ep in empty_plots[:can_afford]:
         await db.plant_crop(user["user_id"], ep["slot"], crop_name, crop["minutes"])
-        planted += 1
 
     final = await db.get_user(user["user_id"])
     await update.message.reply_text(
-        f"{crop['emoji']} 批量种植 {crop_name} x{planted}！\n"
-        f"💰 共花费 {crop['seed'] * planted} MB\n"
+        f"{crop['emoji']} 批量种植 {crop_name} x{can_afford}！\n"
+        f"💰 共花费 {total_cost} MB\n"
         f"💰 余额: {final['balance']:.1f} MB"
     )
 
@@ -474,6 +501,7 @@ async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     total_reward = 0
     total_exp = 0
     harvested = []
+    pest_blocked = []
 
     for p in plots:
         if not p["crop"] or p["is_dead"]:
@@ -482,17 +510,19 @@ async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not crop:
             continue
         remain = game.get_remaining_minutes(p["planted_at"], p["effective_minutes"] or crop["minutes"])
-        if remain <= 0 and not p["has_pest"]:
-            reward = crop["reward"]
-            total_reward += reward
-            total_exp += math.ceil(crop["seed"] / 2)
-            harvested.append({"name": p["crop"], "emoji": crop["emoji"], "reward": reward})
-            await db.clear_plot(uid, p["slot"])
+        if remain <= 0:
+            if p["has_pest"]:
+                pest_blocked.append(f"{crop['emoji']}{p['crop']}")
+            else:
+                total_reward += crop["reward"]
+                total_exp += math.ceil(crop["seed"] / 2)
+                harvested.append({"name": p["crop"], "emoji": crop["emoji"], "reward": crop["reward"]})
+                await db.clear_plot(uid, p["slot"])
 
     if not harvested:
         hint = ""
-        if any(p["crop"] and p["has_pest"] for p in plots):
-            hint = "\n💡 有些作物有害虫，先 /fm_clean 清理"
+        if pest_blocked:
+            hint = f"\n💡 有 {len(pest_blocked)} 个成熟作物被害虫阻止，先 /fm_clean 清理"
         return await update.message.reply_text(f"🌱 没有成熟的作物可以收获~{hint}\n\n使用 /fm_farm 查看农场状态")
 
     await db.update_balance(uid, total_reward)
@@ -506,19 +536,8 @@ async def cmd_harvest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text += f"\n💰 共获得 {total_reward:.1f} MB 流量\n"
     text += f"💰 余额: {fresh['balance']:.1f} MB | 经验 +{total_exp}"
 
-    # 提示被害虫阻止的成熟作物
-    pest_blocked = []
-    fresh_plots = await db.get_plots(uid)
-    for p in fresh_plots:
-        if p["crop"] and not p["is_dead"] and p["has_pest"]:
-            crop = game.get_crop(p["crop"])
-            if crop:
-                remain = game.get_remaining_minutes(p["planted_at"], p["effective_minutes"] or crop["minutes"])
-                if remain <= 0:
-                    pest_blocked.append(f"{crop['emoji']}{p['crop']}")
     if pest_blocked:
         text += f"\n\n⚠️ 还有 {len(pest_blocked)} 个成熟作物被害虫阻止收获：{', '.join(pest_blocked)}\n用 /fm_clean 清理后再收获"
-
     if new_level:
         text += f"\n\n🎉 恭喜升级到 Lv.{new_level}！农场扩展到 {fresh['plots']} 块地！"
     await update.message.reply_text(text)
@@ -619,7 +638,6 @@ async def cmd_steal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     target_name = target_plot["username"] or "Anonymous"
     new_count = steal_count + 1
 
-    # 30% success
     if random.random() > 0.3:
         fine = round(crop["reward"] * random.uniform(0.1, 0.3), 1)
         await db.update_balance(uid, -fine)
@@ -631,7 +649,6 @@ async def cmd_steal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # success: steal 20% of reward
     stolen = round(crop["reward"] * random.uniform(0.15, 0.25), 1)
     await db.update_balance(uid, stolen)
     await update.message.reply_text(
@@ -713,13 +730,10 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     if isinstance(update, Update):
         extra.update(_build_update_log_context(update))
     logger.error("update.error", exc_info=ctx.error, extra=extra)
-    if isinstance(update, Update) and update.message:
-        try:
-            await update.message.reply_text("❌ 处理命令时出错，请稍后再试")
-        except Exception:
-            pass
+    # 不再自动回复用户, 避免错误循环时产生API洪水
 
 
+# ── app lifecycle ────────────────────────────────────────
 async def post_init(app: Application):
     await db.init()
     await app.bot.set_my_commands([
@@ -741,10 +755,11 @@ async def post_init(app: Application):
         BotCommand("fm_help", "玩法说明"),
     ])
 
+    # 定时任务 (降低频率)
     jq = app.job_queue
-    jq.run_repeating(_wrap_job("job_random_pest", job_random_pest), interval=600, first=60)
-    jq.run_repeating(_wrap_job("job_check_pest_death", job_check_pest_death), interval=300, first=120)
-    jq.run_repeating(_wrap_job("job_check_mature", job_check_mature), interval=120, first=30)
+    jq.run_repeating(_wrap_job("job_random_pest", job_random_pest), interval=1800, first=120)       # 每30分钟
+    jq.run_repeating(_wrap_job("job_check_pest_death", job_check_pest_death), interval=600, first=300)  # 每10分钟
+    jq.run_repeating(_wrap_job("job_check_mature", job_check_mature), interval=300, first=60)        # 每5分钟
     logger.info("app.ready", extra={"event": "app_ready"})
 
 
@@ -779,7 +794,8 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("app.starting", extra={"event": "app_starting"})
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # drop_pending_updates=True: 重启时丢弃积压消息, 避免洪水
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
